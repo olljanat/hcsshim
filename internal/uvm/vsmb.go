@@ -1,7 +1,9 @@
 package uvm
 
 import (
+	"bytes"
 	"context"
+	"encoding/gob"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -19,15 +21,15 @@ type VSMBShare struct {
 	vm           *UtilityVM
 	HostPath     string
 	refCount     uint32
-	name         string
-	allowedFiles []string
-	guestPath    string
-	readOnly     bool
+	Name         string
+	AllowedFiles []string
+	GuestPath    string
+	Options      hcsschema.VirtualSmbShareOptions
 }
 
 // Release frees the resources of the corresponding vsmb Mount
 func (vsmb *VSMBShare) Release(ctx context.Context) error {
-	if err := vsmb.vm.RemoveVSMB(ctx, vsmb.HostPath, vsmb.readOnly); err != nil {
+	if err := vsmb.vm.RemoveVSMB(ctx, vsmb.HostPath, vsmb.Options.ReadOnly); err != nil {
 		return fmt.Errorf("failed to remove VSMB share: %s", err)
 	}
 	return nil
@@ -98,12 +100,12 @@ func (uvm *UtilityVM) AddVSMB(ctx context.Context, hostPath string, options *hcs
 
 		share = &VSMBShare{
 			vm:        uvm,
-			name:      shareName,
-			guestPath: vsmbSharePrefix + shareName,
-			readOnly:  options.ReadOnly,
+			Name:      shareName,
+			GuestPath: vsmbSharePrefix + shareName,
+			HostPath:  hostPath,
 		}
 	}
-	newAllowedFiles := share.allowedFiles
+	newAllowedFiles := share.AllowedFiles
 	if options.RestrictFileAccess {
 		newAllowedFiles = append(newAllowedFiles, file)
 	}
@@ -116,7 +118,7 @@ func (uvm *UtilityVM) AddVSMB(ctx context.Context, hostPath string, options *hcs
 		modification := &hcsschema.ModifySettingRequest{
 			RequestType: requestType,
 			Settings: hcsschema.VirtualSmbShare{
-				Name:         share.name,
+				Name:         share.Name,
 				Options:      options,
 				Path:         hostPath,
 				AllowedFiles: newAllowedFiles,
@@ -128,8 +130,9 @@ func (uvm *UtilityVM) AddVSMB(ctx context.Context, hostPath string, options *hcs
 		}
 	}
 
-	share.allowedFiles = newAllowedFiles
+	share.AllowedFiles = newAllowedFiles
 	share.refCount++
+	share.Options = *options
 	m[shareKey] = share
 	return share, nil
 }
@@ -167,7 +170,7 @@ func (uvm *UtilityVM) RemoveVSMB(ctx context.Context, hostPath string, readOnly 
 
 	modification := &hcsschema.ModifySettingRequest{
 		RequestType:  requesttype.Remove,
-		Settings:     hcsschema.VirtualSmbShare{Name: share.name},
+		Settings:     hcsschema.VirtualSmbShare{Name: share.Name},
 		ResourcePath: vSmbShareResourcePath,
 	}
 	if err := uvm.modify(ctx, modification); err != nil {
@@ -203,7 +206,83 @@ func (uvm *UtilityVM) GetVSMBUvmPath(ctx context.Context, hostPath string, readO
 	if err != nil {
 		return "", err
 	}
-	return filepath.Join(share.guestPath, f), nil
+	return filepath.Join(share.GuestPath, f), nil
+}
+
+var _ = (Cloneable)(&VSMBShare{})
+
+// serializes the VSMBShare struct
+func (vsmb *VSMBShare) GobEncode() ([]byte, error) {
+	var buf bytes.Buffer
+	encoder := gob.NewEncoder(&buf)
+	errMsgFmt := "failed to encode VSMBShare: %s"
+	// encode only the fields that can be safely deserialized.
+	if err := encoder.Encode(vsmb.HostPath); err != nil {
+		return []byte{}, fmt.Errorf(errMsgFmt, err)
+	}
+	if err := encoder.Encode(vsmb.Name); err != nil {
+		return []byte{}, fmt.Errorf(errMsgFmt, err)
+	}
+	if err := encoder.Encode(vsmb.AllowedFiles); err != nil {
+		return []byte{}, fmt.Errorf(errMsgFmt, err)
+	}
+	if err := encoder.Encode(vsmb.GuestPath); err != nil {
+		return []byte{}, fmt.Errorf(errMsgFmt, err)
+	}
+	if err := encoder.Encode(vsmb.Options); err != nil {
+		return []byte{}, fmt.Errorf(errMsgFmt, err)
+	}
+	return buf.Bytes(), nil
+}
+
+// deserializes the VSMBShare struct into the struct on which this is called (i.e the vsmb pointer)
+func (vsmb *VSMBShare) GobDecode(data []byte) error {
+	buf := bytes.NewBuffer(data)
+	decoder := gob.NewDecoder(buf)
+	errMsgFmt := "failed to decode VSMBShare: %s"
+	// fields should be decoded in the same order in which they were encoded.
+	if err := decoder.Decode(&vsmb.HostPath); err != nil {
+		return fmt.Errorf(errMsgFmt, err)
+	}
+	if err := decoder.Decode(&vsmb.Name); err != nil {
+		return fmt.Errorf(errMsgFmt, err)
+	}
+	if err := decoder.Decode(&vsmb.AllowedFiles); err != nil {
+		return fmt.Errorf(errMsgFmt, err)
+	}
+	if err := decoder.Decode(&vsmb.GuestPath); err != nil {
+		return fmt.Errorf(errMsgFmt, err)
+	}
+	if err := decoder.Decode(&vsmb.Options); err != nil {
+		return fmt.Errorf(errMsgFmt, err)
+	}
+	return nil
+}
+
+// To clone VSMB share we just need to add it into the config doc of that VM and increase the
+// vsmb counter.
+func (vsmb *VSMBShare) Clone(ctx context.Context, vm *UtilityVM, cd *cloneData) (interface{}, error) {
+	cd.doc.VirtualMachine.Devices.VirtualSmb.Shares = append(cd.doc.VirtualMachine.Devices.VirtualSmb.Shares, hcsschema.VirtualSmbShare{
+		Name:         vsmb.Name,
+		Path:         vsmb.HostPath,
+		Options:      &vsmb.Options,
+		AllowedFiles: vsmb.AllowedFiles,
+	})
+	vm.vsmbCounter++
+
+	clonedVSMB := &VSMBShare{
+		vm:           vm,
+		HostPath:     vsmb.HostPath,
+		refCount:     1,
+		Name:         vsmb.Name,
+		Options:      vsmb.Options,
+		AllowedFiles: vsmb.AllowedFiles,
+		GuestPath:    vsmb.GuestPath,
+	}
+
+	vm.vsmbDirShares[vsmb.HostPath] = clonedVSMB
+
+	return clonedVSMB, nil
 }
 
 // getVSMBShareKey returns a string key which encapsulates the information that
