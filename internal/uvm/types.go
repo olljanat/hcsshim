@@ -119,4 +119,8 @@ type UtilityVM struct {
 
 	// specifies if this UVM is a cloned from a template
 	IsClone bool
+
+	// The CreateOpts used to create this uvm. These can be either of type
+	// uvm.OptionsLCOW or uvm.OptionsWCOW
+	createOpts interface{}
 }

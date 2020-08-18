@@ -191,6 +191,7 @@ func CreateWCOW(ctx context.Context, opts *OptionsWCOW) (_ *UtilityVM, err error
 		vpciDevices:             make(map[string]*VPCIDevice),
 		physicallyBacked:        !opts.AllowOvercommit,
 		devicesPhysicallyBacked: opts.FullyPhysicallyBacked,
+		createOpts:              *opts,
 	}
 
 	defer func() {
@@ -281,9 +282,7 @@ func CreateWCOW(ctx context.Context, opts *OptionsWCOW) (_ *UtilityVM, err error
 	// Add appropriate VSMB share options if this UVM needs to be saved as a template
 	if opts.IsTemplate {
 		for _, share := range doc.VirtualMachine.Devices.VirtualSmb.Shares {
-			share.Options.PseudoDirnotify = true
-			share.Options.NoLocks = true
-			share.Options.NoDirectmap = true
+			uvm.SetSaveableVSMBOptions(share.Options, share.Options.ReadOnly)
 		}
 		uvm.IsTemplate = true
 	}

@@ -166,6 +166,7 @@ func CreateLCOW(ctx context.Context, opts *OptionsLCOW) (_ *UtilityVM, err error
 		vpciDevices:             make(map[string]*VPCIDevice),
 		physicallyBacked:        !opts.AllowOvercommit,
 		devicesPhysicallyBacked: opts.FullyPhysicallyBacked,
+		createOpts:              opts,
 	}
 
 	defer func() {
